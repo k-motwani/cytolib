@@ -17,11 +17,10 @@ namespace cytolib
 		 CytoFramePtr ptr;
 
 		CytoVFS vfs(ctx);
-		 auto fmt = uri_backend_type(uri, vfs);
-		 bool is_exist = fmt == FileFormat::H5?vfs.is_file(uri):vfs.is_dir(uri);
+		 bool is_exist = vfs.is_file(uri);
 		if(!is_exist)
 		 throw(domain_error("cytoframe file missing for sample: " + uri));
-		if(fmt == FileFormat::H5&&is_remote_path(uri))
+		if(is_remote_path(uri))
 		{
 
 			 throw(domain_error("H5cytoframe doesn't support remote loading: " + uri));
@@ -30,14 +29,7 @@ namespace cytolib
 		else
 		{
 
-			if(fmt == FileFormat::H5)
 				ptr.reset(new H5CytoFrame(uri, readonly));
-			else
-	#ifdef HAVE_TILEDB
-				ptr.reset(new TileCytoFrame(uri, readonly, true, ctx));
-	#else
-			throw(domain_error("cytolib is not built with tiledb support!"));
-	#endif
 
 		}
 		return ptr;
@@ -174,7 +166,7 @@ namespace cytolib
 				curTrans->transforming(&param_range.second, 1);
 			}
 
-
+			cytoframe.set_keyword("transformation", "custom");
 			cytoframe.set_range(curChannel, ColType::channel, param_range);
 
 		}
@@ -240,8 +232,16 @@ namespace cytolib
 				break;
 			}
 		case LOGICALGATE://skip any gating operation since the indice is already set once the gate is added
-		case CLUSTERGATE:
-			node.computeStats();
+		case CLUSTERGATE:{
+		  auto curIndices = node.getIndices();
+		  std::transform(curIndices.begin(), curIndices.end(),
+                   parentIndice.getIndices().begin(), curIndices.begin(),
+                   std::logical_and<bool>());
+		  
+		  node.setIndices(curIndices);
+		  node.computeStats();
+		}
+			
 			return;
 		default:
 			{
@@ -333,11 +333,7 @@ namespace cytolib
 			frame_.set_readonly(false);//temporary unlock it
 			frame_.flush_meta();
 			frame_.set_readonly(flag);//restore the lock
-			string ext;
-			if(frame_.get_backend_type() == FileFormat::TILE)
-				ext = ".tile";
-			else
-				ext = ".h5";
+			string ext= ".h5";
 
 			frame_.convertToPb(*fr_pb, cf_filename + ext, h5_opt, ctx);
 		}
@@ -357,13 +353,18 @@ namespace cytolib
 			const pb::nodeProperties & np_pb = node_pb.node();
 
 			VertexID curChildID = i;
-			tree[curChildID] = nodeProperties(np_pb);
-
-			if(node_pb.has_parent()){
-				VertexID parentID = node_pb.parent();
-				boost::add_edge(parentID,curChildID,tree);
+			auto np = nodeProperties(np_pb);
+			tree[curChildID] = np;
+			
+			VertexID parentID = node_pb.parent();
+			// check if current node is root (since parent could be 0 for both /root and
+			// root/A for proto3 when its parent is absent)
+			// assumption is node A won't be named as 'root', will be enforced at name
+			// setter
+			if ((parentID == 0 && np.getName() != "root") || parentID > 0) {
+			  boost::add_edge(parentID, curChildID, tree);
 			}
-
+			
 		}
 		//restore comp
 		comp = compensation(pb_gh.comp());
@@ -560,7 +561,17 @@ namespace cytolib
 		if(g_loglevel>=GATING_HIERARCHY_LEVEL)
 				PRINT("\nstart transform Gates \n");
 
-
+		// rm dataonly trans
+		auto trans1 = trans;
+		cytolib::trans_map transMap;
+		for (auto i : trans1.getTransMap()) {
+		  if (!i.second->dataOnly()) 
+		  {
+		    transMap[i.first] = i.second;
+		  }
+		}
+		trans1.setTransMap(transMap);
+		
 			VertexID_vec vertices=getVertices(0);
 
 			for(VertexID_vec::iterator it=vertices.begin();it!=vertices.end();it++)
@@ -578,10 +589,10 @@ namespace cytolib
 					if(gateType == CURLYQUADGATE)
 					{
 						CurlyQuadGate& curlyGate = dynamic_cast<CurlyQuadGate&>(*g);
-						curlyGate.interpolate(trans);//the interpolated polygon is in raw scale
+						curlyGate.interpolate(trans1);//the interpolated polygon is in raw scale
 					}
 					if(gateType!=BOOLGATE)
-						g->transforming(trans);
+						g->transforming(trans1);
 
 				}
 			}
@@ -646,7 +657,7 @@ namespace cytolib
 			 *
 			 */
 			if(!node.isGated())
-				gating(cytoframe, u, recompute, computeTerminalBool, skip_faulty_node);
+				gating(cytoframe, pid, recompute, computeTerminalBool, skip_faulty_node);
 
 			parentIndice = INTINDICES(node.getIndices());
 
@@ -906,9 +917,13 @@ namespace cytolib
 		template < typename Vertex, typename Graph >
 		void discover_vertex(Vertex u, const Graph & g)
 		{
-			// Only add if it's a leaf under the starting_node
-			if(!backtracking && boost::out_degree(u, g) == 0)
+			// Only add to phylo node record if it's under the starting node
+			if(!backtracking){
+			    if(boost::out_degree(u,g) == 0)
 				phylo_tree.leaf_nodes.push_back(u);
+			    else
+				phylo_tree.internal_nodes.push_back(u);
+			}
 		}
 		template < typename Edge, typename Graph >
 		void tree_edge(Edge e, const Graph & g)
@@ -1425,7 +1440,8 @@ namespace cytolib
 		nodePath.push_front(sNodePath);
 
 		//init searching routes
-		VertexID_vec leafIDs=getDescendants(0,leafName);
+		VertexID_vec leafIDs;
+		if (!fullPath) leafIDs = getDescendants(0, leafName);//only invoke getDescendants call when non-full-path is requested since it gets expensive for large tree
 
 		//start to trace back to ancestors
 		while(u > 0)
@@ -1626,11 +1642,7 @@ namespace cytolib
 		res->trans = trans.copy();
 		if(is_copy_data)
 		{
-			string ext;
-			if(frame_.get_backend_type() == FileFormat::TILE)
-				ext = ".tile";
-			else
-				ext = ".h5";
+			string ext= ".h5";
 
 			if(is_realize_data)
 				res->frame_ = frame_.copy_realized(cf_filename + ext);

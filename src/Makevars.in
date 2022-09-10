@@ -15,28 +15,33 @@ boost_sys_objs=${boost_sys_src:.cpp=.o}
 boost_fs_src=${wildcard boost/libs/filesystem/src/*.cpp}
 boost_fs_objs=${boost_fs_src:.cpp=.o}
 
-PKG_CPPFLAGS =-DROUT -I../inst/include -DBOOST_NO_AUTO_PTR
+PKG_CPPFLAGS =-DROUT -I../inst/include -DBOOST_NO_AUTO_PTR -DBOOST_FILESYSTEM_NO_CXX20_ATOMIC_REF -DBOOST_FILESYSTEM_SINGLE_THREADED #the last to flagsare needed to compile bundled boost file system library 1.78
 
+cytolib_src=${wildcard *.cpp}
+cytolib_objs=${cytolib_src:.cpp=.o}
+
+BOOSTFSLIB = libboost_fs.a
+USERDIR = ${R_PACKAGE_DIR}/lib${R_ARCH}
+USERLIB = ${USERDIR}/libcytolib.a
+
+OBJECTS=dummy.o
 
 #needs to wrap in $(shell) to strip the quotes returned by rhdf5lib::pkgconfig
-RHDF5_LIBS= $(shell "${R_HOME}/bin/Rscript" -e 'Rhdf5lib::pkgconfig("PKG_CXX_LIBS")')
 FSLIB = ${boost_fs_objs} ${boost_sys_objs}
 
-PKG_LIBS = $(FSLIB) $(LAPACK_LIBS) $(BLAS_LIBS) $(FLIBS) `${R_HOME}/bin/Rscript -e "RProtoBufLib:::LdFlags()"` $(RHDF5_LIBS) `${R_HOME}/bin/Rscript -e "RcppParallel::RcppParallelLibs()"`  
 
-HAVE_TILEDB=@HAVE_TILEDB@
-ifeq ($(HAVE_TILEDB),yes)
-PKG_CPPFLAGS += -DHAVE_TILEDB @TILEDB_INCLUDE@  
-PKG_LIBS += @TILEDB_LIBS@
-endif
 
 all: $(SHLIB) 
 
-$(SHLIB): ${boost_fs_objs}
+$(SHLIB): $(USERLIB)
+
+$(USERLIB): ${boost_fs_objs} ${cytolib_objs} 
+	mkdir -p "${USERDIR}"
+	$(AR) rs "${USERLIB}" ${cytolib_objs} ${boost_fs_objs} ${boost_sys_objs}
 
 $(boost_fs_objs): ${boost_sys_objs}
 
 
 clean:
-	rm -f $(OBJECTS) ${boost_fs_objs} ${boost_sys_objs}
+	rm -f $(OBJECTS) ${cytolib_objs} ${boost_fs_objs} ${boost_sys_objs} $(SHLIB)
  
