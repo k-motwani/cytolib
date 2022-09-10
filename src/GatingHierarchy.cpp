@@ -1602,9 +1602,6 @@ namespace cytolib
 		// Append full paths for leaf names
 		for(auto leaf : out_phylo.leaf_nodes)
 			out_phylo.leaf_names.push_back(getNodePath(leaf, fullPath));
-		// Append full paths for internal node names
-		for(auto node : out_phylo.internal_nodes)
-			out_phylo.internal_names.push_back(getNodePath(node, fullPath));
 		return out_phylo;
 	}
 
